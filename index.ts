@@ -17,214 +17,184 @@ interface UserProfile {
   followingCount: number;
 }
 
+interface LoginCredentials {
+  username: string;
+  password: string;
+}
+
 class SocialMediaScraper {
   private browser: Browser | null = null;
   private page: Page | null = null;
+  private isLoggedIn: boolean = false;
 
-  async initialize() {
+  private async delay(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  async initialize(credentials?: LoginCredentials) {
     try {
       this.browser = await puppeteer.launch({
         headless: "new",
-        defaultViewport: { width: 1280, height: 800 },
+        defaultViewport: { width: 1920, height: 1080 },
         args: [
           "--no-sandbox",
           "--disable-setuid-sandbox",
           "--disable-dev-shm-usage",
           "--disable-accelerated-2d-canvas",
           "--disable-gpu",
-          "--no-first-run",
-          "--no-zygote",
-          "--single-process",
+          "--window-size=1920,1080",
         ],
-        ignoreHTTPSErrors: true,
       });
 
       this.page = await this.browser.newPage();
 
+      // Set a more realistic viewport
+      await this.page.setViewport({ width: 1920, height: 1080 });
+
+      // Set a more realistic user agent
       await this.page.setUserAgent(
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
       );
 
-      await this.page.setRequestInterception(true);
-
-      this.page.on("request", (request) => {
-        const resourceType = request.resourceType();
-        if (["image", "stylesheet", "font"].includes(resourceType)) {
-          request.abort();
-        } else {
-          request.continue();
-        }
+      // Add additional headers
+      await this.page.setExtraHTTPHeaders({
+        "Accept-Language": "en-US,en;q=0.9",
+        Accept:
+          "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        Connection: "keep-alive",
+        "Accept-Encoding": "gzip, deflate, br",
       });
+
+      // Only login if credentials are provided
+      if (credentials) {
+        await this.login(credentials);
+      }
     } catch (error) {
       console.error("Failed to initialize scraper:", error);
       throw error;
     }
   }
 
-  private async waitForSelector(selector: string, timeout = 5000) {
+  private async login(credentials: LoginCredentials) {
     if (!this.page) throw new Error("Page not initialized");
+
     try {
-      await this.page.waitForSelector(selector, { timeout });
-      return true;
-    } catch (error) {
-      console.error(`Timeout waiting for selector: ${selector}`);
-      return false;
-    }
-  }
+      // Navigate to Instagram login page
+      await this.page.goto("https://www.instagram.com/accounts/login/", {
+        waitUntil: "networkidle0",
+        timeout: 30000,
+      });
 
-  private extractHashtags(text: string): string[] {
-    const hashtagRegex = /#[\w\u0590-\u05ff]+/g;
-    return text.match(hashtagRegex) || [];
-  }
-
-  private parseLikeCount(text: string): number {
-    try {
-      const cleanText = text.replace(/[,\s]/g, "").toLowerCase();
-      if (cleanText.includes("k")) {
-        return parseFloat(cleanText) * 1000;
-      }
-      if (cleanText.includes("m")) {
-        return parseFloat(cleanText) * 1000000;
-      }
-      return parseInt(cleanText) || 0;
-    } catch {
-      return 0;
-    }
-  }
-
-  private async retryOperation<T>(
-    operation: () => Promise<T>,
-    retries = 3,
-    delay = 1000,
-  ): Promise<T> {
-    let lastError;
-    for (let i = 0; i < retries; i++) {
+      // Wait for cookie dialog and accept it if present
       try {
-        return await operation();
-      } catch (error) {
-        lastError = error;
-        if (i < retries - 1) {
-          await new Promise((resolve) => setTimeout(resolve, delay));
-          delay *= 2; // Exponential backoff
+        const cookieButton = await this.page.$(
+          '[role="dialog"] button:first-child',
+        );
+        if (cookieButton) {
+          await cookieButton.click();
+          await this.delay(1000);
         }
+      } catch (e) {
+        console.log("No cookie dialog found");
       }
+
+      // Wait for the login form
+      await this.page.waitForSelector('input[name="username"]');
+      await this.page.waitForSelector('input[name="password"]');
+
+      // Type credentials with random delays
+      await this.page.type('input[name="username"]', credentials.username, {
+        delay: 100,
+      });
+      await this.page.type('input[name="password"]', credentials.password, {
+        delay: 150,
+      });
+
+      // Click login button
+      await this.page.click('button[type="submit"]');
+
+      // Wait for navigation
+      await this.page.waitForNavigation({ waitUntil: "networkidle0" });
+
+      // Check if login was successful
+      const loginError = await this.page.$('p[role="alert"]');
+      if (loginError) {
+        throw new Error("Login failed - incorrect credentials");
+      }
+
+      this.isLoggedIn = true;
+      console.log("Successfully logged in");
+
+      // Wait a bit after login
+      await this.delay(3000);
+    } catch (error) {
+      console.error("Login failed:", error);
+      throw error;
     }
-    throw lastError;
   }
 
   async scrapeUserProfile(username: string): Promise<UserProfile> {
     if (!this.page) throw new Error("Scraper not initialized");
 
     try {
-      // Navigate to profile page with retry mechanism
-      console.log(`Navigating to profile: ${username}`);
-      await this.retryOperation(async () => {
-        await this.page!.goto(`https://www.instagram.com/${username}/`, {
-          waitUntil: "networkidle0",
-          timeout: 30000,
-        });
+      // Add random delay before navigation
+      await this.delay(Math.random() * 2000 + 1000);
+
+      // Navigate to profile page
+      await this.page.goto(`https://www.instagram.com/${username}/`, {
+        waitUntil: "networkidle0",
+        timeout: 300000,
       });
 
-      // Wait for login check
-      if (await this.waitForSelector('input[name="username"]')) {
-        throw new Error("Login required to view this profile");
+      // If not logged in, handle the login wall
+      if (!this.isLoggedIn) {
+        const loginWall = await this.page.$("text/Log in to Instagram");
+        if (loginWall) {
+          throw new Error("Login required to view this profile");
+        }
       }
 
-      // Wait for profile content to load
-      await this.waitForSelector("header section");
+      // Wait longer for content to load
+      await this.delay(3000);
 
-      // Extract bio with retry
-      const bio = await this.retryOperation(async () => {
-        return await this.page!.evaluate(() => {
-          const bioElement = document.querySelector("header section span");
-          return bioElement ? bioElement.textContent || "" : "";
-        });
+      // Extract bio and counts with extended timeout
+      const profileData = await this.page.evaluate(() => {
+        const bioElement = document.querySelector<HTMLElement>("h1");
+        const followerElement = document.querySelector(
+          "li:nth-child(2) span span",
+        );
+        const followingElement = document.querySelector(
+          "li:nth-child(3) span span",
+        );
+
+        return {
+          bio: bioElement?.innerText || "",
+          followers: followerElement?.innerText || "0",
+          following: followingElement?.innerText || "0",
+        };
       });
 
-      console.log("Bio extracted successfully");
+      // Convert follower counts
+      const followersCount = this.parseCount(profileData.followers);
+      const followingCount = this.parseCount(profileData.following);
 
-      // Extract follower counts with retry
-      const followersCount = await this.retryOperation(async () => {
-        return await this.page!.evaluate(() => {
-          const element = document.querySelector(
-            "header section ul li:nth-child(2) span",
-          );
-          return element ? parseInt(element.textContent || "0", 10) : 0;
-        });
-      });
-
-      const followingCount = await this.retryOperation(async () => {
-        return await this.page!.evaluate(() => {
-          const element = document.querySelector(
-            "header section ul li:nth-child(3) span",
-          );
-          return element ? parseInt(element.textContent || "0", 10) : 0;
-        });
-      });
-
-      console.log("Follower counts extracted");
-
-      // Extract posts
+      // Extract posts with scroll simulation
       const posts: PostData[] = [];
+      const postLinks = await this.getPostLinks();
 
-      // Get all post links with retry
-      const postLinks = await this.retryOperation(async () => {
-        return await this.page!.evaluate(() => {
-          const links = document.querySelectorAll("article a");
-          return Array.from(links, (link) => link.href).slice(0, 4);
-        });
-      });
-
-      console.log(`Found ${postLinks.length} posts`);
-
-      // Process each post
-      for (const link of postLinks) {
+      for (const link of postLinks.slice(0, 4)) {
         try {
-          await this.retryOperation(async () => {
-            await this.page!.goto(link, { waitUntil: "networkidle0" });
-          });
-
-          const postData = await this.retryOperation(async () => {
-            return await this.page!.evaluate(() => {
-              const caption =
-                document.querySelector("article h1")?.textContent || "";
-              const likes =
-                document.querySelector("article section span")?.textContent ||
-                "0";
-              const timestamp = document.querySelector("time")?.dateTime || "";
-
-              return {
-                caption,
-                likes,
-                timestamp,
-              };
-            });
-          });
-
-          const hashtags = this.extractHashtags(postData.caption);
-
-          posts.push({
-            type: await this.determinePostType(),
-            likes: this.parseLikeCount(postData.likes),
-            hashtags,
-            caption: postData.caption,
-            postUrl: link,
-            timestamp: postData.timestamp,
-          });
-
-          console.log(`Processed post: ${link}`);
-
-          // Add a small delay between posts
-          await new Promise((resolve) => setTimeout(resolve, 1000));
+          const postData = await this.scrapePost(link);
+          posts.push(postData);
+          await this.delay(Math.random() * 1000 + 500);
         } catch (error) {
-          console.error(`Error processing post ${link}:`, error);
-          continue;
+          console.error(`Error scraping post ${link}:`, error);
         }
       }
 
       return {
         username,
-        bio,
+        bio: profileData.bio,
         posts,
         followersCount,
         followingCount,
@@ -235,6 +205,52 @@ class SocialMediaScraper {
     }
   }
 
+  private parseCount(count: string): number {
+    const multipliers = { k: 1000, m: 1000000, b: 1000000000 };
+    const normalized = count.toLowerCase().replace(/,/g, "");
+    const match = normalized.match(/^([\d.]+)([kmb])?$/);
+
+    if (!match) return 0;
+
+    const [, num, unit] = match;
+    const value = parseFloat(num);
+    return unit ? value * multipliers[unit as keyof typeof multipliers] : value;
+  }
+
+  private async getPostLinks(): Promise<string[]> {
+    if (!this.page) throw new Error("Page not initialized");
+
+    return await this.page.evaluate(() => {
+      const links = document.querySelectorAll("article a");
+      return Array.from(links, (link) => link.href);
+    });
+  }
+
+  private async scrapePost(url: string): Promise<PostData> {
+    if (!this.page) throw new Error("Page not initialized");
+
+    await this.page.goto(url, { waitUntil: "networkidle0" });
+    await this.delay(2000);
+
+    const postData = await this.page.evaluate(() => {
+      const caption = document.querySelector("h1")?.innerText || "";
+      const likes =
+        document.querySelector("section span span")?.innerText || "0";
+      const timestamp = document.querySelector("time")?.dateTime || "";
+
+      return { caption, likes, timestamp };
+    });
+
+    return {
+      type: await this.determinePostType(),
+      likes: this.parseCount(postData.likes),
+      hashtags: this.extractHashtags(postData.caption),
+      caption: postData.caption,
+      postUrl: url,
+      timestamp: postData.timestamp,
+    };
+  }
+
   private async determinePostType(): Promise<
     "image" | "video" | "carousel" | "reel"
   > {
@@ -242,12 +258,15 @@ class SocialMediaScraper {
 
     return await this.page.evaluate(() => {
       if (document.querySelector("video")) return "video";
-      if (document.querySelector('button[aria-label="Next"]'))
-        return "carousel";
-      if (document.querySelector('[role="button"][tabindex="0"]'))
-        return "reel";
+      if (document.querySelector('[aria-label="Next"]')) return "carousel";
+      if (document.location.pathname.includes("/reel/")) return "reel";
       return "image";
     });
+  }
+
+  private extractHashtags(text: string): string[] {
+    const hashtagRegex = /#[\w\u0590-\u05ff]+/g;
+    return text.match(hashtagRegex) || [];
   }
 
   async close() {
@@ -261,42 +280,18 @@ class SocialMediaScraper {
 async function main() {
   const scraper = new SocialMediaScraper();
   try {
-    console.log("Initializing scraper...");
-    await scraper.initialize();
-    console.log("Scraper initialized successfully");
-
-    const username = "rajat_9629"; // Replace with actual username
-    console.log(`Starting to scrape profile: ${username}`);
-
-    const profile = await scraper.scrapeUserProfile(username);
-
-    console.log("\nProfile Data:");
-    console.log("Bio:", profile.bio);
-    console.log("Followers:", profile.followersCount.toLocaleString());
-    console.log("Following:", profile.followingCount.toLocaleString());
-
-    console.log("\nPosts Data:");
-    profile.posts.forEach((post, index) => {
-      console.log(`\nPost ${index + 1}:`);
-      console.log("Type:", post.type);
-      console.log("Likes:", post.likes.toLocaleString());
-      console.log("Hashtags:", post.hashtags.join(", "));
-      console.log("Posted:", new Date(post.timestamp).toLocaleDateString());
+    await scraper.initialize({
+      username: "aditya_isfit",
+      password: "jjyespapa@123",
     });
+
+    const profile = await scraper.scrapeUserProfile("alluarjunonline");
+    console.log(JSON.stringify(profile, null, 2));
   } catch (error) {
     console.error("Scraping failed:", error);
-    if (error instanceof Error) {
-      console.error("Error name:", error.name);
-      console.error("Error message:", error.message);
-      console.error("Stack trace:", error.stack);
-    }
   } finally {
     await scraper.close();
-    console.log("Scraper closed successfully");
   }
 }
 
-main().catch((error) => {
-  console.error("Fatal error:", error);
-  process.exit(1);
-});
+main().catch(console.error);
