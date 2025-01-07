@@ -281,8 +281,8 @@ async function main() {
   const scraper = new SocialMediaScraper();
   try {
     await scraper.initialize({
-      username: "aditya_isfit",
-      password: "jjyespapa@123",
+      username: "UserName",
+      password: "Pass",
     });
 
     const profile = await scraper.scrapeUserProfile("alluarjunonline");
