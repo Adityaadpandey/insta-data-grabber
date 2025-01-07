@@ -92,15 +92,37 @@ class SocialMediaScraper {
     }
   }
 
+  private async retryOperation<T>(
+    operation: () => Promise<T>,
+    retries = 3,
+    delay = 1000,
+  ): Promise<T> {
+    let lastError;
+    for (let i = 0; i < retries; i++) {
+      try {
+        return await operation();
+      } catch (error) {
+        lastError = error;
+        if (i < retries - 1) {
+          await new Promise((resolve) => setTimeout(resolve, delay));
+          delay *= 2; // Exponential backoff
+        }
+      }
+    }
+    throw lastError;
+  }
+
   async scrapeUserProfile(username: string): Promise<UserProfile> {
     if (!this.page) throw new Error("Scraper not initialized");
 
     try {
-      // Navigate to profile page
+      // Navigate to profile page with retry mechanism
       console.log(`Navigating to profile: ${username}`);
-      await this.page.goto(`https://www.instagram.com/${username}/`, {
-        waitUntil: "networkidle0",
-        timeout: 30000,
+      await this.retryOperation(async () => {
+        await this.page!.goto(`https://www.instagram.com/${username}/`, {
+          waitUntil: "networkidle0",
+          timeout: 30000,
+        });
       });
 
       // Wait for login check
@@ -111,27 +133,33 @@ class SocialMediaScraper {
       // Wait for profile content to load
       await this.waitForSelector("header section");
 
-      // Extract bio
-      const bio = await this.page.evaluate(() => {
-        const bioElement = document.querySelector("header section span");
-        return bioElement ? bioElement.textContent || "" : "";
+      // Extract bio with retry
+      const bio = await this.retryOperation(async () => {
+        return await this.page!.evaluate(() => {
+          const bioElement = document.querySelector("header section span");
+          return bioElement ? bioElement.textContent || "" : "";
+        });
       });
 
       console.log("Bio extracted successfully");
 
-      // Extract follower counts
-      const followersCount = await this.page.evaluate(() => {
-        const element = document.querySelector(
-          "header section ul li:nth-child(2) span",
-        );
-        return element ? parseInt(element.textContent || "0", 10) : 0;
+      // Extract follower counts with retry
+      const followersCount = await this.retryOperation(async () => {
+        return await this.page!.evaluate(() => {
+          const element = document.querySelector(
+            "header section ul li:nth-child(2) span",
+          );
+          return element ? parseInt(element.textContent || "0", 10) : 0;
+        });
       });
 
-      const followingCount = await this.page.evaluate(() => {
-        const element = document.querySelector(
-          "header section ul li:nth-child(3) span",
-        );
-        return element ? parseInt(element.textContent || "0", 10) : 0;
+      const followingCount = await this.retryOperation(async () => {
+        return await this.page!.evaluate(() => {
+          const element = document.querySelector(
+            "header section ul li:nth-child(3) span",
+          );
+          return element ? parseInt(element.textContent || "0", 10) : 0;
+        });
       });
 
       console.log("Follower counts extracted");
@@ -139,10 +167,12 @@ class SocialMediaScraper {
       // Extract posts
       const posts: PostData[] = [];
 
-      // Get all post links
-      const postLinks = await this.page.evaluate(() => {
-        const links = document.querySelectorAll("article a");
-        return Array.from(links, (link) => link.href).slice(0, 4); // Get first 12 posts
+      // Get all post links with retry
+      const postLinks = await this.retryOperation(async () => {
+        return await this.page!.evaluate(() => {
+          const links = document.querySelectorAll("article a");
+          return Array.from(links, (link) => link.href).slice(0, 4);
+        });
       });
 
       console.log(`Found ${postLinks.length} posts`);
@@ -150,27 +180,31 @@ class SocialMediaScraper {
       // Process each post
       for (const link of postLinks) {
         try {
-          await this.page.goto(link, { waitUntil: "networkidle0" });
+          await this.retryOperation(async () => {
+            await this.page!.goto(link, { waitUntil: "networkidle0" });
+          });
 
-          const postData = await this.page.evaluate(() => {
-            const caption =
-              document.querySelector("article h1")?.textContent || "";
-            const likes =
-              document.querySelector("article section span")?.textContent ||
-              "0";
-            const timestamp = document.querySelector("time")?.dateTime || "";
+          const postData = await this.retryOperation(async () => {
+            return await this.page!.evaluate(() => {
+              const caption =
+                document.querySelector("article h1")?.textContent || "";
+              const likes =
+                document.querySelector("article section span")?.textContent ||
+                "0";
+              const timestamp = document.querySelector("time")?.dateTime || "";
 
-            return {
-              caption,
-              likes,
-              timestamp,
-            };
+              return {
+                caption,
+                likes,
+                timestamp,
+              };
+            });
           });
 
           const hashtags = this.extractHashtags(postData.caption);
 
           posts.push({
-            type: "image", // Default to image, you can enhance this later
+            type: await this.determinePostType(),
             likes: this.parseLikeCount(postData.likes),
             hashtags,
             caption: postData.caption,
@@ -181,7 +215,7 @@ class SocialMediaScraper {
           console.log(`Processed post: ${link}`);
 
           // Add a small delay between posts
-          await this.page.waitForTimeout(1000);
+          await new Promise((resolve) => setTimeout(resolve, 1000));
         } catch (error) {
           console.error(`Error processing post ${link}:`, error);
           continue;
@@ -201,6 +235,21 @@ class SocialMediaScraper {
     }
   }
 
+  private async determinePostType(): Promise<
+    "image" | "video" | "carousel" | "reel"
+  > {
+    if (!this.page) throw new Error("Page not initialized");
+
+    return await this.page.evaluate(() => {
+      if (document.querySelector("video")) return "video";
+      if (document.querySelector('button[aria-label="Next"]'))
+        return "carousel";
+      if (document.querySelector('[role="button"][tabindex="0"]'))
+        return "reel";
+      return "image";
+    });
+  }
+
   async close() {
     if (this.browser) {
       await this.browser.close();
@@ -216,21 +265,21 @@ async function main() {
     await scraper.initialize();
     console.log("Scraper initialized successfully");
 
-    const username = "adp_alpha"; // Replace with actual username
+    const username = "rajat_9629"; // Replace with actual username
     console.log(`Starting to scrape profile: ${username}`);
 
     const profile = await scraper.scrapeUserProfile(username);
 
     console.log("\nProfile Data:");
     console.log("Bio:", profile.bio);
-    console.log("Followers:", profile.followersCount);
-    console.log("Following:", profile.followingCount);
+    console.log("Followers:", profile.followersCount.toLocaleString());
+    console.log("Following:", profile.followingCount.toLocaleString());
 
     console.log("\nPosts Data:");
     profile.posts.forEach((post, index) => {
       console.log(`\nPost ${index + 1}:`);
       console.log("Type:", post.type);
-      console.log("Likes:", post.likes);
+      console.log("Likes:", post.likes.toLocaleString());
       console.log("Hashtags:", post.hashtags.join(", "));
       console.log("Posted:", new Date(post.timestamp).toLocaleDateString());
     });
@@ -242,16 +291,11 @@ async function main() {
       console.error("Stack trace:", error.stack);
     }
   } finally {
-    try {
-      await scraper.close();
-      console.log("Scraper closed successfully");
-    } catch (closeError) {
-      console.error("Error while closing scraper:", closeError);
-    }
+    await scraper.close();
+    console.log("Scraper closed successfully");
   }
 }
 
-// Run the scraper
 main().catch((error) => {
   console.error("Fatal error:", error);
   process.exit(1);
